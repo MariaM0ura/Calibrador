@@ -1,3 +1,4 @@
+
 """
 pipeline.py — Módulo importável de calibragem de campanhas Amazon Ads.
 
