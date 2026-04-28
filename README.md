@@ -42,7 +42,7 @@ Acesse: **http://localhost:8501**
 - Barra de progresso com status de cada etapa
 - Cards com métricas: bids / budgets / placements alterados
 - Tabela do relatório com filtro por tipo
-- Botões de download da planilha ajustada e do relatório CSV
+- Botões de download da planilha ajustada e do relatório em Excel
 
 Ou use o script de atalho:
 
@@ -99,7 +99,7 @@ curl -X POST "http://localhost:8000/processar" \
   },
   "downloads": {
     "planilha":  "/download/abc123-.../BulkSheet_Ajustado.xlsx",
-    "relatorio": "/download/abc123-.../relatorio_alteracoes.csv"
+    "relatorio": "/download/abc123-.../relatorio_alteracoes.xlsx"
   },
   "relatorio": [...]
 }
@@ -111,8 +111,8 @@ curl -X POST "http://localhost:8000/processar" \
 # Planilha ajustada
 curl -O "http://localhost:8000/download/{job_id}/BulkSheet_Ajustado.xlsx"
 
-# Relatório CSV
-curl -O "http://localhost:8000/download/{job_id}/relatorio_alteracoes.csv"
+# Relatório Excel
+curl -O "http://localhost:8000/download/{job_id}/relatorio_alteracoes.xlsx"
 ```
 
 ---

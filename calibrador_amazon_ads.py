@@ -18,7 +18,6 @@ Estrutura da aba "Sponsored Products Campaigns":
 
 import os
 import sys
-import csv
 import warnings
 import openpyxl
 from datetime import datetime
@@ -361,7 +360,7 @@ def modulo_placement(ws, relatorio):
 def main():
     input_file  = "BulkSheetExport (2).xlsx"
     output_file = "BulkSheet_Ajustado.xlsx"
-    report_file = "relatorio_alteracoes.csv"
+    report_file = "relatorio_alteracoes.xlsx"
 
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -429,11 +428,14 @@ def main():
 
     # --- [7/8] Relatório de alterações ---
     print(f"\n[7/8] Gerando relatório '{report_file}'...")
-    with open(report_file, "w", newline="", encoding="utf-8-sig") as f:
-        campos = ["Campanha", "Tipo", "Valor Antigo", "Valor Novo", "Motivo"]
-        writer = csv.DictWriter(f, fieldnames=campos, delimiter=";")
-        writer.writeheader()
-        writer.writerows(relatorio)
+    wb_relatorio = openpyxl.Workbook()
+    ws_relatorio = wb_relatorio.active
+    ws_relatorio.title = "Relatorio"
+    campos = ["Campanha", "Tipo", "Valor Antigo", "Valor Novo", "Motivo"]
+    ws_relatorio.append(campos)
+    for item in relatorio:
+        ws_relatorio.append([item.get(campo, "") for campo in campos])
+    wb_relatorio.save(report_file)
     print(f"  → {len(relatorio)} alterações registradas em '{report_file}'")
 
     # --- [8/8] Exportar planilha final ---

@@ -8,7 +8,6 @@ Docs interativas:
     http://localhost:8000/docs
 """
 
-import csv
 import io
 import os
 import tempfile
@@ -16,6 +15,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
+import openpyxl
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 
@@ -107,13 +107,16 @@ async def processar(
     xlsx_name = "BulkSheet_Ajustado.xlsx"
     resultado["workbook"].save(str(job_dir / xlsx_name))
 
-    # Salvar relatório CSV
-    csv_name = "relatorio_alteracoes.csv"
-    with open(job_dir / csv_name, "w", newline="", encoding="utf-8-sig") as f:
-        campos = ["Campanha", "Tipo", "Valor Antigo", "Valor Novo", "Motivo"]
-        writer = csv.DictWriter(f, fieldnames=campos, delimiter=";")
-        writer.writeheader()
-        writer.writerows(resultado["relatorio"])
+    # Salvar relatório XLSX
+    relatorio_name = "relatorio_alteracoes.xlsx"
+    relatorio_wb = openpyxl.Workbook()
+    relatorio_ws = relatorio_wb.active
+    relatorio_ws.title = "Relatorio"
+    campos = ["Campanha", "Tipo", "Valor Antigo", "Valor Novo", "Motivo"]
+    relatorio_ws.append(campos)
+    for item in resultado["relatorio"]:
+        relatorio_ws.append([item.get(campo, "") for campo in campos])
+    relatorio_wb.save(job_dir / relatorio_name)
 
     n_total = resultado["n_bids"] + resultado["n_budgets"] + resultado["n_placements"]
 
@@ -128,7 +131,7 @@ async def processar(
         },
         "downloads": {
             "planilha":  f"/download/{job_id}/{xlsx_name}",
-            "relatorio": f"/download/{job_id}/{csv_name}",
+            "relatorio": f"/download/{job_id}/{relatorio_name}",
         },
         "relatorio": resultado["relatorio"],
     }
@@ -144,7 +147,7 @@ def download(job_id: str, arquivo: str):
     Retorna o arquivo gerado pelo endpoint `/processar`.
 
     - **job_id**: identificador retornado pelo `/processar`
-    - **arquivo**: `BulkSheet_Ajustado.xlsx` ou `relatorio_alteracoes.csv`
+    - **arquivo**: `BulkSheet_Ajustado.xlsx` ou `relatorio_alteracoes.xlsx`
     """
     # Proteção contra path traversal
     if "/" in arquivo or "\\" in arquivo or ".." in arquivo:
@@ -158,10 +161,6 @@ def download(job_id: str, arquivo: str):
             detail="Arquivo não encontrado. O job pode ter expirado ou o job_id está incorreto.",
         )
 
-    media_type = (
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        if arquivo.lower().endswith(".xlsx")
-        else "text/csv; charset=utf-8"
-    )
+    media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
     return FileResponse(path=str(file_path), filename=arquivo, media_type=media_type)

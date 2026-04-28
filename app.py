@@ -6,7 +6,6 @@ Executar:
 """
 
 import io
-import csv
 
 import pandas as pd
 import streamlit as st
@@ -81,7 +80,7 @@ rodar = st.button(
 
 if rodar and uploaded_file:
     # Limpar resultado anterior
-    for key in ("resultado", "xlsx_bytes", "csv_bytes"):
+    for key in ("resultado", "xlsx_bytes", "relatorio_xlsx_bytes"):
         st.session_state.pop(key, None)
 
     progress_bar = st.progress(0.0)
@@ -112,17 +111,19 @@ if rodar and uploaded_file:
         resultado["workbook"].save(wb_buffer)
         wb_buffer.seek(0)
 
-        # Serializar CSV para bytes (download)
-        csv_buffer = io.StringIO()
-        campos = ["Campanha", "Tipo", "Valor Antigo", "Valor Novo", "Motivo"]
-        writer = csv.DictWriter(csv_buffer, fieldnames=campos, delimiter=";")
-        writer.writeheader()
-        writer.writerows(resultado["relatorio"])
+        # Serializar relatório XLSX para bytes (download)
+        relatorio_buffer = io.BytesIO()
+        df_relatorio = pd.DataFrame(
+            resultado["relatorio"],
+            columns=["Campanha", "Tipo", "Valor Antigo", "Valor Novo", "Motivo"],
+        )
+        df_relatorio.to_excel(relatorio_buffer, index=False, sheet_name="Relatorio")
+        relatorio_buffer.seek(0)
 
         # Armazenar na sessão
         st.session_state["resultado"]  = resultado
         st.session_state["xlsx_bytes"] = wb_buffer.getvalue()
-        st.session_state["csv_bytes"]  = csv_buffer.getvalue().encode("utf-8-sig")
+        st.session_state["relatorio_xlsx_bytes"] = relatorio_buffer.getvalue()
 
         progress_bar.progress(1.0)
         status_text.empty()
@@ -203,9 +204,9 @@ if "resultado" in st.session_state:
     )
 
     dl_col2.download_button(
-        label="📥 Relatório de Alterações (.csv)",
-        data=st.session_state["csv_bytes"],
-        file_name="relatorio_alteracoes.csv",
-        mime="text/csv",
+        label="📥 Relatório de Alterações (.xlsx)",
+        data=st.session_state["relatorio_xlsx_bytes"],
+        file_name="relatorio_alteracoes.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
     )
