@@ -50,6 +50,29 @@ _COL_ROAS           = 52  # AZ
 _ABA_SP   = "Sponsored Products Campaigns"
 _ABAS_RAS = ("RAS Campaigns", "RAS Search Term Report")
 _PLACEMENT_MAXIMO = 900.0
+_BUDGET_SHEET_CONFIG = {
+    "sp": {
+        "sheet_name": "Sponsored Products Campaigns",
+        "campaign_col": 10,
+        "budget_col": 21,
+        "sales_col": 46,
+        "roas_col": 52,
+    },
+    "sb": {
+        "sheet_name": "Sponsored Brands Campaigns",
+        "campaign_col": 10,
+        "budget_col": 19,
+        "sales_col": 45,
+        "roas_col": 51,
+    },
+    "sd": {
+        "sheet_name": "Sponsored Display Campaigns",
+        "campaign_col": 9,
+        "budget_col": 21,
+        "sales_col": 35,
+        "roas_col": 41,
+    },
+}
 
 
 # ---------------------------------------------------------------------------
@@ -67,6 +90,13 @@ def _to_float(val, default=0.0):
 
 def _campaign_name(ws, row):
     name = ws.cell(row, _COL_CAMPAIGN_NAME).value or ws.cell(row, _COL_CAMPAIGN_INFO).value
+    return (name or "").strip()
+
+
+def _campaign_name_with_col(ws, row, campaign_col):
+    name = ws.cell(row, campaign_col).value
+    if not name:
+        name = ws.cell(row, _COL_CAMPAIGN_INFO).value
     return (name or "").strip()
 
 
@@ -160,61 +190,122 @@ def _modulo_bid(ws, relatorio, cfg):
 # ---------------------------------------------------------------------------
 
 def _modulo_budget(ws, relatorio, cfg):
-    ajustados     = 0
     roas_target   = cfg["roas_target"]
     budget_diario = cfg["budget_diario"]
     budget_minimo = cfg["budget_minimo"]
+    incluir_sb    = cfg["incluir_budget_sb"]
+    incluir_sd    = cfg["incluir_budget_sd"]
+
+    sheet_keys = ["sp"]
+    if incluir_sb:
+        sheet_keys.append("sb")
+    if incluir_sd:
+        sheet_keys.append("sd")
 
     campanhas = []
-    for row in range(2, ws.max_row + 1):
-        if ws.cell(row, _COL_ENTITY).value != "Campaign":
+    for key in sheet_keys:
+        cfg_sheet = _BUDGET_SHEET_CONFIG[key]
+        ws_local = ws.parent[cfg_sheet["sheet_name"]] if cfg_sheet["sheet_name"] in ws.parent.sheetnames else None
+        if ws_local is None:
             continue
-        campanhas.append({
-            "row":    row,
-            "camp":   _campaign_name(ws, row),
-            "budget": _to_float(ws.cell(row, _COL_BUDGET).value),
-            "sales":  _to_float(ws.cell(row, _COL_SALES).value),
-            "roas":   _to_float(ws.cell(row, _COL_ROAS).value),
-        })
+
+        for row in range(2, ws_local.max_row + 1):
+            if ws_local.cell(row, _COL_ENTITY).value != "Campaign":
+                continue
+            campanhas.append({
+                "sheet_name": cfg_sheet["sheet_name"],
+                "ws": ws_local,
+                "row": row,
+                "camp": _campaign_name_with_col(ws_local, row, cfg_sheet["campaign_col"]),
+                "budget_col": cfg_sheet["budget_col"],
+                "budget": _to_float(ws_local.cell(row, cfg_sheet["budget_col"]).value),
+                "sales": _to_float(ws_local.cell(row, cfg_sheet["sales_col"]).value),
+                "roas": _to_float(ws_local.cell(row, cfg_sheet["roas_col"]).value),
+            })
 
     if not campanhas:
         return 0
 
     total_sales = sum(c["sales"] for c in campanhas)
     if total_sales <= 0:
-        return 0
+        total_sales = len(campanhas)
 
-    # Calcular novo budget individual
     for c in campanhas:
-        sales_share = c["sales"] / total_sales
+        sales_share = (c["sales"] / total_sales) if total_sales > 0 else (1.0 / len(campanhas))
         fator, motivo = calcular_ajuste_roas(c["roas"], roas_target)
 
         novo = c["budget"] * fator
         novo = max(novo, budget_minimo)
 
-        # Budget máximo dinâmico por share (headroom de 1.5×)
         budget_max = max(sales_share * budget_diario * 1.5, budget_minimo)
         novo = min(novo, budget_max)
 
         c["novo_budget"] = round(novo, 2)
-        c["motivo"] = f"Sales Share={sales_share*100:.1f}% | ROAS={c['roas']:.2f} | {motivo}"
+        c["motivo"] = (
+            f"Aba={c['sheet_name']} | Sales Share={sales_share*100:.1f}% | "
+            f"ROAS={c['roas']:.2f} | {motivo}"
+        )
 
-    # Proteção global: soma dos budgets não pode ultrapassar budget diário
     soma = sum(c["novo_budget"] for c in campanhas)
     if soma > budget_diario:
+        campanhas_ruins = sorted(
+            [c for c in campanhas if c["roas"] < roas_target and c["novo_budget"] > 0],
+            key=lambda x: (x["roas"], x["novo_budget"]),
+        )
+        for c in campanhas_ruins:
+            if soma <= budget_diario:
+                break
+            soma -= c["novo_budget"]
+            c["novo_budget"] = 0.0
+            c["motivo"] += " | Pausar campanha por baixo ROAS para respeitar budget diário"
+
+    soma = sum(c["novo_budget"] for c in campanhas)
+    if soma > budget_diario and soma > 0:
         fator_global = budget_diario / soma
         for c in campanhas:
-            c["novo_budget"] = round(max(c["novo_budget"] * fator_global, budget_minimo), 2)
-            c["motivo"] += f" | Proteção global (fator={fator_global:.4f})"
+            if c["novo_budget"] <= 0:
+                continue
+            c["novo_budget"] = round(c["novo_budget"] * fator_global, 2)
+            c["motivo"] += f" | Redução proporcional (fator={fator_global:.4f})"
 
+    soma = round(sum(c["novo_budget"] for c in campanhas), 2)
+    sobra = round(budget_diario - soma, 2)
+    if sobra > 0:
+        ativos = [c for c in campanhas if c["novo_budget"] > 0]
+        if ativos:
+            pesos = [max(c["roas"], 0.01) for c in ativos]
+            peso_total = sum(pesos)
+            restante = sobra
+            for idx, c in enumerate(ativos):
+                if idx == len(ativos) - 1:
+                    adicional = restante
+                else:
+                    adicional = round(sobra * (pesos[idx] / peso_total), 2)
+                    restante = round(restante - adicional, 2)
+                c["novo_budget"] = round(c["novo_budget"] + adicional, 2)
+                c["motivo"] += " | Ajuste para utilização total da verba diária"
+
+    soma_final = round(sum(c["novo_budget"] for c in campanhas), 2)
+    diferenca = round(budget_diario - soma_final, 2)
+    if diferenca != 0:
+        candidatos = [c for c in campanhas if c["novo_budget"] > 0]
+        if candidatos:
+            melhor = max(candidatos, key=lambda x: x["roas"])
+            melhor["novo_budget"] = round(max(melhor["novo_budget"] + diferenca, 0.0), 2)
+            melhor["motivo"] += " | Ajuste de centavos para fechar budget diário"
+
+    ajustados = 0
     for c in campanhas:
-        if c["novo_budget"] == c["budget"]:
+        novo_budget = round(c["novo_budget"], 2)
+        if novo_budget == c["budget"]:
             continue
-        ws.cell(c["row"], _COL_BUDGET).value    = c["novo_budget"]
-        ws.cell(c["row"], _COL_OPERATION).value = "update"
+        c["ws"].cell(c["row"], c["budget_col"]).value = novo_budget
+        c["ws"].cell(c["row"], _COL_OPERATION).value = "update"
         relatorio.append({
-            "Campanha": c["camp"], "Tipo": "Budget",
-            "Valor Antigo": c["budget"], "Valor Novo": c["novo_budget"],
+            "Campanha": c["camp"],
+            "Tipo": "Budget",
+            "Valor Antigo": c["budget"],
+            "Valor Novo": novo_budget,
             "Motivo": c["motivo"],
         })
         ajustados += 1
@@ -293,6 +384,8 @@ def rodar_calibragem(
     calibrar_bid: bool = True,
     calibrar_budget: bool = True,
     calibrar_placement: bool = True,
+    incluir_budget_sb: bool = True,
+    incluir_budget_sd: bool = True,
     on_progress=None,
 ) -> dict:
     """
@@ -308,6 +401,8 @@ def rodar_calibragem(
         calibrar_bid:        Ativar Módulo 1 — Bid.
         calibrar_budget:     Ativar Módulo 2 — Budget.
         calibrar_placement:  Ativar Módulo 3 — Placement.
+        incluir_budget_sb:   Incluir Sponsored Brands no cálculo do budget.
+        incluir_budget_sd:   Incluir Sponsored Display no cálculo do budget.
         on_progress:         Callable(pct: float, msg: str) para atualizar UI (opcional).
 
     Returns:
@@ -334,6 +429,8 @@ def rodar_calibragem(
         "bid_maximo":    bid_maximo,
         "budget_minimo": budget_minimo,
         "dias":          dias,
+        "incluir_budget_sb": incluir_budget_sb,
+        "incluir_budget_sd": incluir_budget_sd,
     }
 
     # --- Carregar workbook ---
