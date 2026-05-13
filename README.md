@@ -1,6 +1,6 @@
 # Robô de Calibragem de Campanhas — Amazon Ads
 
-Ajusta automaticamente bids, budgets e placements de campanhas **Sponsored Products** com base em ROAS e Sales Share. Disponível como interface web (Streamlit) e API REST (FastAPI).
+Ajusta automaticamente bids, budgets e placements de campanhas **Sponsored Products**, **Sponsored Brands** e **Sponsored Display** com base em ROAS e Sales Share. Disponível como interface web (Streamlit) e API REST (FastAPI).
 
 ---
 
@@ -38,6 +38,8 @@ Acesse: **http://localhost:8501**
 **O que a interface oferece:**
 - Upload do BulkSheet (.xlsx)
 - Sidebar com todos os parâmetros de calibragem
+- Três tetos de **budget diário** (SP, SB, SD): cada um limita só a calibragem de budget da respetiva aba; **0** desativa budget nessa aba
+- Bids nas três abas (quando existirem no ficheiro); placement continua só na aba SP
 - Checkboxes para ativar/desativar cada módulo (Bid, Budget, Placement)
 - Barra de progresso com status de cada etapa
 - Cards com métricas: bids / budgets / placements alterados
@@ -76,7 +78,9 @@ curl -X POST "http://localhost:8000/processar" \
   -F "arquivo=@BulkSheetExport.xlsx" \
   -G \
   --data-urlencode "roas_target=4.0" \
-  --data-urlencode "budget_diario=500.0" \
+  --data-urlencode "budget_diario_sp=500.0" \
+  --data-urlencode "budget_diario_sb=0.0" \
+  --data-urlencode "budget_diario_sd=0.0" \
   --data-urlencode "bid_maximo=5.0" \
   --data-urlencode "budget_minimo=10.0" \
   --data-urlencode "dias=30" \
@@ -127,7 +131,9 @@ Edite as flags no topo do arquivo antes de rodar:
 
 ```python
 ROAS_TARGET          = 4.0
-BUDGET_DIARIO_CONTA  = 500.0
+BUDGET_DIARIO_SP     = 500.0
+BUDGET_DIARIO_SB     = 0.0
+BUDGET_DIARIO_SD     = 0.0
 BID_MAXIMO           = 5.0
 BUDGET_MINIMO        = 10.0
 DIAS                 = 30
@@ -234,6 +240,6 @@ sudo nginx -t && sudo systemctl reload nginx
 
 | Módulo | Entidade | Coluna | Regra principal |
 |--------|----------|--------|-----------------|
-| **Bid** | Keyword / Product Targeting | AB | Baixo volume (<5×dias cliques) → +5%; desvio de ROAS → ±5% a ±20%; nunca excede Bid Máximo |
-| **Budget** | Campaign | U | Ajuste por ROAS + Sales Share; proteção global impede soma > Budget Diário |
+| **Bid** | Keyword / Product Targeting (e entidades configuráveis em SB/SD) | Coluna *Bid* / *Max Bid* (via cabeçalho da aba) | Baixo volume (<5×dias cliques) → +5%; desvio de ROAS → ±5% a ±20%; nunca excede Bid Máximo |
+| **Budget** | Campaign | Coluna de budget da aba (SP/SB/SD) | Ajuste por ROAS + Sales Share **por aba**; teto = budget diário daquela aba (0 = não calibrar) |
 | **Placement** | Bidding Adjustment | AI | Placement=0 com ROAS bom → 10%; desvio de ROAS → ±5% a ±20%; limites 0%–900% |

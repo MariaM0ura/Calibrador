@@ -30,7 +30,30 @@ st.sidebar.markdown("---")
 
 st.sidebar.subheader("Parâmetros gerais")
 roas_target    = st.sidebar.number_input("ROAS Target",                value=4.0,   min_value=0.1,  step=0.1,  format="%.1f")
-budget_diario  = st.sidebar.number_input("Budget Diário da Conta", value=500.0, min_value=1.0,  step=10.0, format="%.2f")
+budget_diario_sp = st.sidebar.number_input(
+    "Budget diário — Sponsored Products",
+    value=500.0,
+    min_value=0.0,
+    step=10.0,
+    format="%.2f",
+    help="Teto diário para calibragem de budget nesta aba. 0 = não alterar budgets de SP.",
+)
+budget_diario_sb = st.sidebar.number_input(
+    "Budget diário — Sponsored Brands",
+    value=0.0,
+    min_value=0.0,
+    step=10.0,
+    format="%.2f",
+    help="0 = não alterar budgets de SB.",
+)
+budget_diario_sd = st.sidebar.number_input(
+    "Budget diário — Sponsored Display",
+    value=0.0,
+    min_value=0.0,
+    step=10.0,
+    format="%.2f",
+    help="0 = não alterar budgets de SD.",
+)
 bid_maximo     = st.sidebar.number_input("Bid Máximo",            value=5.0,   min_value=0.01, step=0.5,  format="%.2f")
 budget_minimo  = st.sidebar.number_input("Budget Mínimo",         value=10.0,  min_value=1.0,  step=1.0,  format="%.2f")
 dias           = st.sidebar.number_input("Período de análise (dias)",   value=30,    min_value=1,    max_value=365, step=1)
@@ -40,8 +63,6 @@ st.sidebar.subheader("Módulos ativos")
 calibrar_bid        = st.sidebar.checkbox("✅ Calibrar Bid",       value=True)
 calibrar_budget     = st.sidebar.checkbox("✅ Calibrar Budget",    value=True)
 calibrar_placement  = st.sidebar.checkbox("✅ Calibrar Placement", value=True)
-calibrar_budget_sb  = st.sidebar.checkbox("✅ Incluir Sponsored Brands no budget", value=True)
-calibrar_budget_sd  = st.sidebar.checkbox("✅ Incluir Sponsored Display no budget", value=True)
 
 st.sidebar.markdown("---")
 st.sidebar.caption("Robô de Calibragem v1.0")
@@ -97,15 +118,15 @@ if rodar and uploaded_file:
         resultado  = rodar_calibragem(
             arquivo=io.BytesIO(file_bytes),
             roas_target=float(roas_target),
-            budget_diario=float(budget_diario),
+            budget_diario_sp=float(budget_diario_sp),
+            budget_diario_sb=float(budget_diario_sb),
+            budget_diario_sd=float(budget_diario_sd),
             bid_maximo=float(bid_maximo),
             budget_minimo=float(budget_minimo),
             dias=int(dias),
             calibrar_bid=calibrar_bid,
             calibrar_budget=calibrar_budget,
             calibrar_placement=calibrar_placement,
-            incluir_budget_sb=calibrar_budget_sb,
-            incluir_budget_sd=calibrar_budget_sd,
             on_progress=on_progress,
         )
 

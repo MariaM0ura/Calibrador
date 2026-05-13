@@ -28,9 +28,9 @@ app = FastAPI(
     title="Robô de Calibragem Amazon Ads",
     description=(
         "API para calibragem automática de bids, budgets e placements "
-        "de campanhas Amazon Ads Sponsored Products."
+        "de campanhas Amazon Ads Sponsored Products, Sponsored Brands e Sponsored Display."
     ),
-    version="1.0.0",
+    version="1.1.0",
     contact={"name": "Calibrador Amazon Ads"},
 )
 
@@ -53,15 +53,15 @@ def health():
 async def processar(
     arquivo: UploadFile = File(..., description="Arquivo .xlsx exportado da Amazon Ads"),
     roas_target: float   = Query(4.0,   description="ROAS alvo das campanhas"),
-    budget_diario: float = Query(500.0, description="Budget diário total da conta"),
+    budget_diario_sp: float = Query(500.0, description="Budget diário (teto) — Sponsored Products (0 = não calibrar budget SP)"),
+    budget_diario_sb: float = Query(0.0,   description="Budget diário (teto) — Sponsored Brands (0 = não calibrar budget SB)"),
+    budget_diario_sd: float = Query(0.0,   description="Budget diário (teto) — Sponsored Display (0 = não calibrar budget SD)"),
     bid_maximo: float    = Query(5.0,   description="Bid máximo permitido por keyword"),
     budget_minimo: float = Query(10.0,  description="Budget mínimo por campanha"),
     dias: int            = Query(30,    description="Período de análise em dias (regra de baixo volume)"),
     calibrar_bid: bool        = Query(True, description="Ativar Módulo 1 — Calibragem de Bid"),
     calibrar_budget: bool     = Query(True, description="Ativar Módulo 2 — Calibragem de Budget"),
     calibrar_placement: bool  = Query(True, description="Ativar Módulo 3 — Calibragem de Placement"),
-    incluir_budget_sb: bool   = Query(True, description="Incluir Sponsored Brands no cálculo de budget"),
-    incluir_budget_sd: bool   = Query(True, description="Incluir Sponsored Display no cálculo de budget"),
 ):
     """
     Recebe o BulkSheet da Amazon Ads (.xlsx) via multipart/form-data,
@@ -87,15 +87,15 @@ async def processar(
         resultado = rodar_calibragem(
             arquivo=io.BytesIO(file_bytes),
             roas_target=roas_target,
-            budget_diario=budget_diario,
+            budget_diario_sp=budget_diario_sp,
+            budget_diario_sb=budget_diario_sb,
+            budget_diario_sd=budget_diario_sd,
             bid_maximo=bid_maximo,
             budget_minimo=budget_minimo,
             dias=dias,
             calibrar_bid=calibrar_bid,
             calibrar_budget=calibrar_budget,
             calibrar_placement=calibrar_placement,
-            incluir_budget_sb=incluir_budget_sb,
-            incluir_budget_sd=incluir_budget_sd,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))

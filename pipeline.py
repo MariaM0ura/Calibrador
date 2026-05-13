@@ -8,7 +8,9 @@ Uso:
     resultado = rodar_calibragem(
         arquivo=io.BytesIO(bytes_do_xlsx),
         roas_target=4.0,
-        budget_diario=500.0,
+        budget_diario_sp=500.0,
+        budget_diario_sb=0.0,
+        budget_diario_sd=0.0,
         ...
     )
 
@@ -50,13 +52,21 @@ _COL_ROAS           = 52  # AZ
 _ABA_SP   = "Sponsored Products Campaigns"
 _ABAS_RAS = ("RAS Campaigns", "RAS Search Term Report")
 _PLACEMENT_MAXIMO = 900.0
-_BUDGET_SHEET_CONFIG = {
+
+# Por produto: nomes de aba, colunas de budget (índices estáveis no Bulk Sheet),
+# entidades de linha com bid editável, e fallback de colunas bid/cliques/roas
+# caso a linha 1 não traga cabeçalhos reconhecíveis.
+_SHEET_CALIBRATION_CONFIG = {
     "sp": {
         "sheet_name": "Sponsored Products Campaigns",
         "campaign_col": 10,
         "budget_col": 21,
         "sales_col": 46,
         "roas_col": 52,
+        "bid_entities": ("Keyword", "Product Targeting"),
+        "bid_col_fb": 28,
+        "clicks_col_fb": 43,
+        "roas_col_fb": 52,
     },
     "sb": {
         "sheet_name": "Sponsored Brands Campaigns",
@@ -64,6 +74,10 @@ _BUDGET_SHEET_CONFIG = {
         "budget_col": 19,
         "sales_col": 45,
         "roas_col": 51,
+        "bid_entities": ("Keyword", "Brand Keyword", "Product Targeting"),
+        "bid_col_fb": 27,
+        "clicks_col_fb": 42,
+        "roas_col_fb": 51,
     },
     "sd": {
         "sheet_name": "Sponsored Display Campaigns",
@@ -71,6 +85,18 @@ _BUDGET_SHEET_CONFIG = {
         "budget_col": 21,
         "sales_col": 35,
         "roas_col": 41,
+        "bid_entities": (
+            "Keyword",
+            "Product Targeting",
+            "Audience Targeting",
+            "Contextual Targeting",
+            "Views Remarketing",
+            "Purchases Remarketing",
+            "Amazon Audiences",
+        ),
+        "bid_col_fb": 26,
+        "clicks_col_fb": 32,
+        "roas_col_fb": 41,
     },
 }
 
@@ -93,10 +119,90 @@ def _campaign_name(ws, row):
     return (name or "").strip()
 
 
-def _campaign_name_with_col(ws, row, campaign_col):
-    name = ws.cell(row, campaign_col).value
-    if not name:
-        name = ws.cell(row, _COL_CAMPAIGN_INFO).value
+def _header_scan(ws, max_cols=220):
+    out = []
+    limit = max(max_cols, (ws.max_column or 0) + 1)
+    for c in range(1, limit + 1):
+        raw = ws.cell(1, c).value
+        h = (str(raw).strip().lower() if raw is not None else "")
+        out.append((c, h, str(raw).strip() if raw is not None else ""))
+    return out
+
+
+def _resolve_bulk_columns(ws, fallback_cfg=None):
+    """
+    Resolve colunas a partir da linha 1 do Bulk Sheet (inglês).
+    fallback_cfg: dict opcional com bid_col_fb, clicks_col_fb, roas_col_fb, entity (default 2).
+    """
+    headers = _header_scan(ws)
+    cmap = {}
+
+    for c, h, _ in headers:
+        if h == "entity":
+            cmap["entity"] = c
+            break
+    for c, h, _ in headers:
+        if h == "operation":
+            cmap["operation"] = c
+            break
+
+    bid_c = None
+    for c, h, _ in headers:
+        if h == "max bid" or h.endswith(" max bid"):
+            bid_c = c
+            break
+    if bid_c is None:
+        for c, h, _ in headers:
+            if h == "bid":
+                bid_c = c
+                break
+    if bid_c is not None:
+        cmap["bid"] = bid_c
+
+    for c, h, _ in headers:
+        if h == "clicks":
+            cmap["clicks"] = c
+            break
+    if "clicks" not in cmap:
+        for c, h, _ in headers:
+            if "clicks" in h and "cost per" not in h and "click-through" not in h:
+                cmap["clicks"] = c
+                break
+
+    roas_cands = [(c, h) for c, h, _ in headers if "roas" in h]
+    if roas_cands:
+        pref = [c for c, h in roas_cands if "14" in h and "sales" in h]
+        cmap["roas"] = pref[0] if pref else roas_cands[0][0]
+
+    for c, h, _ in headers:
+        if "campaign name" in h and "informational" not in h:
+            cmap["campaign_name"] = c
+            break
+    for c, h, _ in headers:
+        if "informational" in h and "campaign name" in h:
+            cmap["campaign_name_informational"] = c
+            break
+
+    fb = fallback_cfg or {}
+    cmap.setdefault("entity", fb.get("entity_fb", _COL_ENTITY))
+    cmap.setdefault("operation", fb.get("operation_fb", _COL_OPERATION))
+    cmap.setdefault("bid", fb.get("bid_col_fb", _COL_BID))
+    cmap.setdefault("clicks", fb.get("clicks_col_fb", _COL_CLICKS))
+    cmap.setdefault("roas", fb.get("roas_col_fb", _COL_ROAS))
+
+    return cmap
+
+
+def _campaign_display_name(ws, row, cmap, fallback_campaign_col):
+    name = None
+    cn = cmap.get("campaign_name")
+    if cn:
+        name = ws.cell(row, cn).value
+    if not name and fallback_campaign_col:
+        name = ws.cell(row, fallback_campaign_col).value
+    ci = cmap.get("campaign_name_informational")
+    if not name and ci:
+        name = ws.cell(row, ci).value
     return (name or "").strip()
 
 
@@ -138,32 +244,39 @@ def calcular_ajuste_roas(roas: float, target: float):
 
 
 # ---------------------------------------------------------------------------
-# Módulo 1 — Bid
+# Módulo 1 — Bid (por aba SP / SB / SD)
 # ---------------------------------------------------------------------------
 
-def _modulo_bid(ws, relatorio, cfg):
+def _modulo_bid_sheet(ws, sheet_name, relatorio, cfg, sheet_cfg):
+    cmap = _resolve_bulk_columns(ws, sheet_cfg)
+    ec = cmap["entity"]
+    bid_c = cmap["bid"]
+    clk_c = cmap["clicks"]
+    roa_c = cmap["roas"]
+    op_c = cmap["operation"]
+    bid_entities = sheet_cfg["bid_entities"]
+
     ajustados = 0
     roas_target = cfg["roas_target"]
-    bid_maximo  = cfg["bid_maximo"]
-    dias        = cfg["dias"]
+    bid_maximo = cfg["bid_maximo"]
+    dias = cfg["dias"]
 
     for row in range(2, ws.max_row + 1):
-        entity = ws.cell(row, _COL_ENTITY).value
-        if entity not in ("Keyword", "Product Targeting"):
+        entity = ws.cell(row, ec).value
+        if entity not in bid_entities:
             continue
 
-        bid_atual = _to_float(ws.cell(row, _COL_BID).value)
+        bid_atual = _to_float(ws.cell(row, bid_c).value)
         if bid_atual <= 0:
             continue
 
-        clicks = _to_float(ws.cell(row, _COL_CLICKS).value)
-        roas   = _to_float(ws.cell(row, _COL_ROAS).value)
-        camp   = _campaign_name(ws, row)
+        clicks = _to_float(ws.cell(row, clk_c).value)
+        roas = _to_float(ws.cell(row, roa_c).value)
+        camp = _campaign_display_name(ws, row, cmap, sheet_cfg["campaign_col"])
 
-        # Regra de baixo volume tem prioridade sobre ROAS
         if clicks < (5 * dias):
             novo_bid = bid_atual * 1.05
-            motivo   = f"Baixo volume de clicks ({int(clicks)} cliques < threshold {5 * dias})"
+            motivo = f"Baixo volume de clicks ({int(clicks)} cliques < threshold {5 * dias})"
         else:
             fator, motivo = calcular_ajuste_roas(roas, roas_target)
             novo_bid = bid_atual * fator
@@ -173,12 +286,14 @@ def _modulo_bid(ws, relatorio, cfg):
         if novo_bid == bid_atual:
             continue
 
-        ws.cell(row, _COL_BID).value       = novo_bid
-        ws.cell(row, _COL_OPERATION).value = "update"
+        ws.cell(row, bid_c).value = novo_bid
+        ws.cell(row, op_c).value = "update"
         relatorio.append({
-            "Campanha": camp, "Tipo": "Bid",
-            "Valor Antigo": bid_atual, "Valor Novo": novo_bid,
-            "Motivo": motivo,
+            "Campanha": camp,
+            "Tipo": "Bid",
+            "Valor Antigo": bid_atual,
+            "Valor Novo": novo_bid,
+            "Motivo": f"[{sheet_name}] {motivo}",
         })
         ajustados += 1
 
@@ -186,42 +301,33 @@ def _modulo_bid(ws, relatorio, cfg):
 
 
 # ---------------------------------------------------------------------------
-# Módulo 2 — Budget
+# Módulo 2 — Budget (uma verba diária por aba)
 # ---------------------------------------------------------------------------
 
-def _modulo_budget(ws, relatorio, cfg):
-    roas_target   = cfg["roas_target"]
-    budget_diario = cfg["budget_diario"]
-    budget_minimo = cfg["budget_minimo"]
-    incluir_sb    = cfg["incluir_budget_sb"]
-    incluir_sd    = cfg["incluir_budget_sd"]
+def _modulo_budget_sheet(ws_local, cfg_sheet, budget_diario, relatorio, cfg):
+    if budget_diario <= 0:
+        return 0
 
-    sheet_keys = ["sp"]
-    if incluir_sb:
-        sheet_keys.append("sb")
-    if incluir_sd:
-        sheet_keys.append("sd")
+    cmap = _resolve_bulk_columns(ws_local, cfg_sheet)
+    entity_c = cmap["entity"]
+    op_c = cmap["operation"]
+    roas_target = cfg["roas_target"]
+    budget_minimo = cfg["budget_minimo"]
 
     campanhas = []
-    for key in sheet_keys:
-        cfg_sheet = _BUDGET_SHEET_CONFIG[key]
-        ws_local = ws.parent[cfg_sheet["sheet_name"]] if cfg_sheet["sheet_name"] in ws.parent.sheetnames else None
-        if ws_local is None:
+    for row in range(2, ws_local.max_row + 1):
+        if ws_local.cell(row, entity_c).value != "Campaign":
             continue
-
-        for row in range(2, ws_local.max_row + 1):
-            if ws_local.cell(row, _COL_ENTITY).value != "Campaign":
-                continue
-            campanhas.append({
-                "sheet_name": cfg_sheet["sheet_name"],
-                "ws": ws_local,
-                "row": row,
-                "camp": _campaign_name_with_col(ws_local, row, cfg_sheet["campaign_col"]),
-                "budget_col": cfg_sheet["budget_col"],
-                "budget": _to_float(ws_local.cell(row, cfg_sheet["budget_col"]).value),
-                "sales": _to_float(ws_local.cell(row, cfg_sheet["sales_col"]).value),
-                "roas": _to_float(ws_local.cell(row, cfg_sheet["roas_col"]).value),
-            })
+        campanhas.append({
+            "sheet_name": cfg_sheet["sheet_name"],
+            "ws": ws_local,
+            "row": row,
+            "camp": _campaign_display_name(ws_local, row, cmap, cfg_sheet["campaign_col"]),
+            "budget_col": cfg_sheet["budget_col"],
+            "budget": _to_float(ws_local.cell(row, cfg_sheet["budget_col"]).value),
+            "sales": _to_float(ws_local.cell(row, cfg_sheet["sales_col"]).value),
+            "roas": _to_float(ws_local.cell(row, cfg_sheet["roas_col"]).value),
+        })
 
     if not campanhas:
         return 0
@@ -300,7 +406,7 @@ def _modulo_budget(ws, relatorio, cfg):
         if novo_budget == c["budget"]:
             continue
         c["ws"].cell(c["row"], c["budget_col"]).value = novo_budget
-        c["ws"].cell(c["row"], _COL_OPERATION).value = "update"
+        c["ws"].cell(c["row"], op_c).value = "update"
         relatorio.append({
             "Campanha": c["camp"],
             "Tipo": "Budget",
@@ -377,40 +483,40 @@ def _modulo_placement(ws, relatorio, cfg):
 def rodar_calibragem(
     arquivo,
     roas_target: float = 4.0,
-    budget_diario: float = 500.0,
+    budget_diario_sp: float = 500.0,
+    budget_diario_sb: float = 0.0,
+    budget_diario_sd: float = 0.0,
     bid_maximo: float = 5.0,
     budget_minimo: float = 10.0,
     dias: int = 30,
     calibrar_bid: bool = True,
     calibrar_budget: bool = True,
     calibrar_placement: bool = True,
-    incluir_budget_sb: bool = True,
-    incluir_budget_sd: bool = True,
     on_progress=None,
 ) -> dict:
     """
     Executa o pipeline completo de calibragem Amazon Ads.
 
     Args:
-        arquivo:             Caminho (str/Path), bytes ou file-like object do .xlsx.
-        roas_target:         ROAS alvo das campanhas.
-        budget_diario:       Budget diário total da conta (R$).
-        bid_maximo:          Bid máximo permitido (R$).
-        budget_minimo:       Budget mínimo por campanha (R$).
-        dias:                Período de análise para regra de baixo volume.
-        calibrar_bid:        Ativar Módulo 1 — Bid.
-        calibrar_budget:     Ativar Módulo 2 — Budget.
-        calibrar_placement:  Ativar Módulo 3 — Placement.
-        incluir_budget_sb:   Incluir Sponsored Brands no cálculo do budget.
-        incluir_budget_sd:   Incluir Sponsored Display no cálculo do budget.
-        on_progress:         Callable(pct: float, msg: str) para atualizar UI (opcional).
+        arquivo:               Caminho (str/Path), bytes ou file-like object do .xlsx.
+        roas_target:           ROAS alvo das campanhas.
+        budget_diario_sp:      Budget diário (teto) só para campanhas em Sponsored Products.
+        budget_diario_sb:      Idem para Sponsored Brands (0 = não calibrar budget nesta aba).
+        budget_diario_sd:      Idem para Sponsored Display (0 = não calibrar budget nesta aba).
+        bid_maximo:            Bid máximo permitido (R$).
+        budget_minimo:         Budget mínimo por campanha (R$).
+        dias:                  Período de análise para regra de baixo volume (bids).
+        calibrar_bid:          Ativar Módulo 1 — Bid (SP, SB e SD quando a aba existir).
+        calibrar_budget:       Ativar Módulo 2 — Budget por aba, respeitando cada verba diária.
+        calibrar_placement:    Ativar Módulo 3 — Placement (apenas na aba SP).
+        on_progress:           Callable(pct: float, msg: str) para atualizar UI (opcional).
 
     Returns:
         {
           "n_bids":          int,
           "n_budgets":       int,
           "n_placements":    int,
-          "relatorio":       list[dict],   # cada item tem Campanha/Tipo/Valor Antigo/Valor Novo/Motivo
+          "relatorio":       list[dict],
           "workbook":        openpyxl.Workbook,
           "abas_removidas":  list[str],
         }
@@ -424,13 +530,10 @@ def rodar_calibragem(
             on_progress(pct, msg)
 
     cfg = {
-        "roas_target":   roas_target,
-        "budget_diario": budget_diario,
-        "bid_maximo":    bid_maximo,
+        "roas_target": roas_target,
+        "bid_maximo": bid_maximo,
         "budget_minimo": budget_minimo,
-        "dias":          dias,
-        "incluir_budget_sb": incluir_budget_sb,
-        "incluir_budget_sd": incluir_budget_sd,
+        "dias": dias,
     }
 
     # --- Carregar workbook ---
@@ -457,33 +560,48 @@ def rodar_calibragem(
         )
     ws = wb[_ABA_SP]
 
-    relatorio   = []
-    n_bids      = 0
-    n_budgets   = 0
+    relatorio = []
+    n_bids = 0
+    n_budgets = 0
     n_placements = 0
+
+    budget_por_chave = {
+        "sp": budget_diario_sp,
+        "sb": budget_diario_sb,
+        "sd": budget_diario_sd,
+    }
 
     # --- Módulo 1: Bid ---
     if calibrar_bid:
-        _prog(0.30, "Módulo 1: Calibrando Bids...")
-        n_bids = _modulo_bid(ws, relatorio, cfg)
+        _prog(0.28, "Módulo 1: Calibrando Bids...")
+        for key in ("sp", "sb", "sd"):
+            sc = _SHEET_CALIBRATION_CONFIG[key]
+            name = sc["sheet_name"]
+            if name not in wb.sheetnames:
+                continue
+            n_bids += _modulo_bid_sheet(wb[name], name, relatorio, cfg, sc)
 
-    # --- Módulo 2: Budget + proteção global ---
+    # --- Módulo 2: Budget (verba independente por aba) ---
     if calibrar_budget:
         _prog(0.55, "Módulo 2: Calibrando Budgets...")
-        n_budgets = _modulo_budget(ws, relatorio, cfg)
+        for key, limite in budget_por_chave.items():
+            sc = _SHEET_CALIBRATION_CONFIG[key]
+            if sc["sheet_name"] not in wb.sheetnames:
+                continue
+            n_budgets += _modulo_budget_sheet(wb[sc["sheet_name"]], sc, limite, relatorio, cfg)
 
-    # --- Módulo 3: Placement ---
+    # --- Módulo 3: Placement (somente SP) ---
     if calibrar_placement:
-        _prog(0.80, "Módulo 3: Calibrando Placements...")
+        _prog(0.82, "Módulo 3: Calibrando Placements...")
         n_placements = _modulo_placement(ws, relatorio, cfg)
 
     _prog(1.0, "Concluído!")
 
     return {
-        "n_bids":         n_bids,
-        "n_budgets":      n_budgets,
-        "n_placements":   n_placements,
-        "relatorio":      relatorio,
-        "workbook":       wb,
+        "n_bids": n_bids,
+        "n_budgets": n_budgets,
+        "n_placements": n_placements,
+        "relatorio": relatorio,
+        "workbook": wb,
         "abas_removidas": abas_removidas,
     }
