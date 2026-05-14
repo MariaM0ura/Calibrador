@@ -346,6 +346,7 @@ def _modulo_budget_sheet(ws_local, cfg_sheet, budget_diario, relatorio, cfg):
         budget_max = max(sales_share * budget_diario * 1.5, budget_minimo)
         novo = min(novo, budget_max)
 
+        c["sales_share"] = sales_share
         c["novo_budget"] = round(novo, 2)
         c["motivo"] = (
             f"Aba={c['sheet_name']} | Sales Share={sales_share*100:.1f}% | "
@@ -354,16 +355,21 @@ def _modulo_budget_sheet(ws_local, cfg_sheet, budget_diario, relatorio, cfg):
 
     soma = sum(c["novo_budget"] for c in campanhas)
     if soma > budget_diario:
+        # Pausar primeiro quem menos pesa em vendas (menor sales share); em empate, pior ROAS.
+        # Assim campanhas com maior participação em receita não são zeradas antes das de baixo impacto.
         campanhas_ruins = sorted(
             [c for c in campanhas if c["roas"] < roas_target and c["novo_budget"] > 0],
-            key=lambda x: (x["roas"], x["novo_budget"]),
+            key=lambda x: (x["sales_share"], x["roas"]),
         )
         for c in campanhas_ruins:
             if soma <= budget_diario:
                 break
             soma -= c["novo_budget"]
             c["novo_budget"] = 0.0
-            c["motivo"] += " | Pausar campanha por baixo ROAS para respeitar budget diário"
+            c["motivo"] += (
+                " | Pausar campanha por baixo ROAS para respeitar budget diário "
+                f"(prioridade: menor sales share primeiro; share={c['sales_share']*100:.1f}%)"
+            )
 
     soma = sum(c["novo_budget"] for c in campanhas)
     if soma > budget_diario and soma > 0:
